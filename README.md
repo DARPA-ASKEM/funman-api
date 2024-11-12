@@ -1,4 +1,4 @@
-# Terarium Notes
+### Terarium Notes
 Terarium will build and publish `funman-base` to GHCR that includes the dReal, ibex and other auxiliaries.
 This build uses CircleCI, see [pipeline results](https://app.circleci.com/pipelines/github/DARPA-ASKEM) 
 
