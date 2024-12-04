@@ -4,6 +4,7 @@ from collections import Counter
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Union
 
+import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
 from pydantic import BaseModel, ValidationInfo, field_validator
@@ -268,13 +269,17 @@ class FunmanResults(BaseModel):
 
         # Get new bounds for each parameter
         amr_parameters = self.model._parameter_names()
+        last_step = self.parameter_space.last_step(true_only=True)
         parameter_bounds = {
-            param: self.parameter_space.outer_interval(param)
+            param: self.parameter_space.outer_interval(
+                param, true_only=True, steps=[last_step]
+            )
             for param in amr_parameters
         }
         self.contracted_model = self.model.contract_parameters(
             parameter_bounds
         )
+        return last_step
 
     def update_parameter_space(
         self, scenario: AnalysisScenario, results: ParameterSpace
@@ -311,7 +316,29 @@ class FunmanResults(BaseModel):
             l.exception(f"Unable to update progress due to exception: {e}")
 
         try:
-            self.contract_model()
+
+            before_params = {}
+            if self.contracted_model:
+                before_params = {
+                    p.id: (
+                        p.distribution.parameters["minimum"],
+                        p.distribution.parameters["maximum"],
+                    )
+                    for p in self.contracted_model.semantics.ode.parameters
+                    if p.distribution
+                }
+                # l.info(f"Before { before_params }")
+            last_step = self.contract_model()
+            after_params = {
+                p.id: (
+                    p.distribution.parameters["minimum"],
+                    p.distribution.parameters["maximum"],
+                )
+                for p in self.contracted_model.semantics.ode.parameters
+                if p.distribution
+            }
+            if after_params != before_params:
+                l.debug(f"Contracted @ {last_step} :  { after_params }")
         except NotImplementedError as e:
             l.info(
                 f"Bypassing output of contracted model because it is not implmented for this model type: {type(self.model)}"
@@ -412,8 +439,18 @@ class FunmanResults(BaseModel):
             df = pd.DataFrame.from_dict(timeseries)
 
             if interpolate:
-                df = df.infer_objects(copy=False).interpolate(
-                    method=interpolate
+                new_index = np.linspace(
+                    df["index"].min(),
+                    df["index"].max(),
+                    num=int(
+                        (df["index"].max() - df["index"].min())
+                        / df["index"].diff().min()
+                    ),
+                )
+                df = (
+                    df.infer_objects(copy=False)
+                    .reindex(new_index)
+                    .interpolate(method=interpolate)
                 )
 
             df["id"] = i
@@ -461,19 +498,22 @@ class FunmanResults(BaseModel):
         timestep = point.timestep()
         max_t = point.schedule.timepoints[timestep]
 
-        a_series["index"] = list(range(0, int(max_t) + 1))
+        a_series["index"] = point.schedule.timepoints
+
         for var, tps in series.items():
 
             if isinstance(tps, dict):
-                vals = [None] * (int(max_t) + 1)
+                vals = [None] * len(a_series["index"])
                 for t, v in tps.items():
-                    if (not isinstance(t, float) or t.isdigit()) and int(
-                        t
-                    ) <= int(max_t):
-                        vals[int(t)] = v
+                    i = point.schedule.timepoints.index(t)
+                    vals[i] = v
+                    # if (not isinstance(t, float) or t.isdigit()) and int(
+                    #     t
+                    # ) <= int(max_t):
+                    #     vals[int(t)] = v
                 a_series[var] = vals
             else:
-                a_series[var] = [tps] * (int(max_t) + 1)
+                a_series[var] = [tps] * len(a_series["index"])
         return a_series
 
     def symbol_values(
@@ -539,7 +579,10 @@ class FunmanResults(BaseModel):
         try:
             t = int(t)
         except Exception:
-            t = None
+            try:
+                t = float(t)
+            except Exception:
+                t = None
         return s, t
 
     def plot_trajectories(self, variable: str, num: int = 200):
